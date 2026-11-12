@@ -1,0 +1,6 @@
+experiments:
+  output_dir: outputs/experiments
+  checkpoint_dir: outputs/checkpoints
+  seed: 42
+  evaluation_episodes: 20
+  deterministic_evaluation: true
