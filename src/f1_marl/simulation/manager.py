@@ -6,6 +6,13 @@ import math
 from collections.abc import Mapping
 from dataclasses import dataclass
 
+from f1_marl.simulation.collision import (
+    SimulationEvent,
+    TrackBoundaryEvent,
+    VehicleCollisionEvent,
+    VehicleFootprint,
+    detect_simulation_events,
+)
 from f1_marl.simulation.physics import step_vehicle
 from f1_marl.simulation.track import Track
 from f1_marl.simulation.track_interaction import (
@@ -35,13 +42,16 @@ class SimulationManager:
         self,
         track: Track,
         parameters: VehicleParameters | None = None,
+        footprint: VehicleFootprint | None = None,
     ) -> None:
         self.track = track
         self.parameters = parameters or VehicleParameters()
+        self.footprint = footprint or VehicleFootprint()
 
         self._states: dict[str, VehicleState] = {}
         self._initial_states: dict[str, VehicleState] = {}
         self._simulation_time_s = 0.0
+        self._last_events: tuple[SimulationEvent, ...] = ()
 
     @property
     def simulation_time_s(self) -> float:
@@ -57,6 +67,23 @@ class SimulationManager:
     def states(self) -> dict[str, VehicleState]:
         """Return a copy of the current vehicle states."""
         return self._states.copy()
+
+    @property
+    def events(self) -> tuple[SimulationEvent, ...]:
+        """Return events detected during the most recent simulation step."""
+        return self._last_events
+
+    @property
+    def collision_events(self) -> tuple[VehicleCollisionEvent, ...]:
+        """Return collision events from the most recent simulation step."""
+        return tuple(
+            event for event in self._last_events if isinstance(event, VehicleCollisionEvent)
+        )
+
+    @property
+    def boundary_events(self) -> tuple[TrackBoundaryEvent, ...]:
+        """Return boundary events from the most recent simulation step."""
+        return tuple(event for event in self._last_events if isinstance(event, TrackBoundaryEvent))
 
     def add_vehicle(
         self,
@@ -74,6 +101,7 @@ class SimulationManager:
 
         self._states[vehicle_id] = initial_state
         self._initial_states[vehicle_id] = initial_state
+        self._last_events = ()
 
     def remove_vehicle(self, vehicle_id: str) -> None:
         """Remove a vehicle from the simulation."""
@@ -82,6 +110,7 @@ class SimulationManager:
 
         del self._states[vehicle_id]
         del self._initial_states[vehicle_id]
+        self._last_events = ()
 
     def get_state(self, vehicle_id: str) -> VehicleState:
         """Return the current state of a registered vehicle."""
@@ -122,6 +151,9 @@ class SimulationManager:
         Exactly one control input must be provided for every registered
         vehicle. All next states are calculated before any are committed,
         so a failed update cannot partially advance the simulation.
+
+        Collision and boundary events are detected after the states
+        advance. Events describe the resulting simulation state.
         """
         if not math.isfinite(dt) or dt <= 0:
             raise ValueError("Timestep must be finite and positive.")
@@ -149,10 +181,21 @@ class SimulationManager:
             for vehicle_id, state in self._states.items()
         }
 
+        next_time = self._simulation_time_s + dt
+
+        next_events = detect_simulation_events(
+            next_states,
+            self.track,
+            self.footprint,
+            next_time,
+        )
+
         self._states = next_states
-        self._simulation_time_s += dt
+        self._simulation_time_s = next_time
+        self._last_events = next_events
 
     def reset(self) -> None:
         """Restore all registered vehicles to their initial states."""
         self._states = self._initial_states.copy()
         self._simulation_time_s = 0.0
+        self._last_events = ()
