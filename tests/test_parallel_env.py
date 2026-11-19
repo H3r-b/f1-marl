@@ -51,7 +51,9 @@ def test_reset_returns_valid_observations_and_infos(env):
     for observation in observations.values():
         assert observation.shape == (29,)
         assert observation.dtype == np.float32
-        assert np.all(observation == 0.0)
+        assert np.all(np.isfinite(observation))
+        assert np.all(observation >= -1.0)
+        assert np.all(observation <= 1.0)
 
 
 def test_reset_reinitializes_episode(env):
@@ -148,3 +150,29 @@ def test_parallel_api_compliance(scenario):
     )
 
     parallel_api_test(env, num_cycles=20)
+
+
+def test_step_observation_contains_previous_actions(env):
+    env.reset(seed=42)
+
+    actions = {agent: np.array([0.5, -0.25], dtype=np.float32) for agent in env.agents}
+
+    observations, _, _, _, _ = env.step(actions)
+
+    for observation in observations.values():
+        assert observation[3] == pytest.approx(0.5)
+        assert observation[4] == pytest.approx(-0.25)
+
+
+def test_reset_clears_previous_actions(env):
+    env.reset(seed=42)
+
+    actions = {agent: np.array([0.5, -0.25], dtype=np.float32) for agent in env.agents}
+
+    env.step(actions)
+
+    observations, _ = env.reset(seed=42)
+
+    for observation in observations.values():
+        assert observation[3] == pytest.approx(0.0)
+        assert observation[4] == pytest.approx(0.0)

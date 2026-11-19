@@ -10,6 +10,7 @@ from gymnasium import spaces
 from gymnasium.utils import seeding
 from pettingzoo import ParallelEnv
 
+from f1_marl.environment.observations import ObservationBuilder
 from f1_marl.simulation.scenarios import RaceScenario
 from f1_marl.simulation.vehicle import ControlInput
 
@@ -17,10 +18,10 @@ from f1_marl.simulation.vehicle import ControlInput
 class ParallelRacingEnv(ParallelEnv):
     """Simultaneous multi-agent racing environment.
 
-    This initial implementation establishes the PettingZoo API and connects
-    agent actions to the existing simulation manager.
+    Connects agent actions to the simulation manager and provides
+    structured observations through the observation builder.
 
-    Observation construction and reward calculation are placeholders.
+    Reward calculation and individual race termination remain placeholders.
     """
 
     metadata = {"name": "f1_marl_parallel_v0"}
@@ -79,6 +80,8 @@ class ParallelRacingEnv(ParallelEnv):
 
         self._simulation = None
         self._step_count = 0
+        self._observation_builder = ObservationBuilder()
+        self._previous_actions: dict[str, tuple[float, float]] = {}
 
     def observation_space(self, agent: str) -> spaces.Box:
         """Return the observation space for an agent."""
@@ -88,16 +91,16 @@ class ParallelRacingEnv(ParallelEnv):
         """Return the action space for an agent."""
         return self.action_spaces[agent]
 
-    def _placeholder_observation(self) -> np.ndarray:
-        """Return a temporary zero observation.
+    def _build_observation(self, agent: str) -> np.ndarray:
+        """Build the current structured observation for an agent."""
+        return self._observation_builder.build(
+            agent,
+            self._simulation,
+            self._previous_actions,
+        )
 
-        The actual 29-feature observation builder will be implemented
-        in a subsequent milestone.
-        """
-        return np.zeros(self.OBSERVATION_DIM, dtype=np.float32)
-
-    def _convert_action(self, action: np.ndarray) -> ControlInput:
-        """Validate and convert a normalized action into vehicle controls."""
+    def _normalize_action(self, action: np.ndarray) -> np.ndarray:
+        """Validate an action and clip it to the normalized action bounds."""
         try:
             values = np.asarray(action, dtype=np.float64)
         except (TypeError, ValueError) as exc:
@@ -109,7 +112,11 @@ class ParallelRacingEnv(ParallelEnv):
         if not np.isfinite(values).all():
             raise ValueError("Action values must be finite.")
 
-        steering, longitudinal = np.clip(values, -1.0, 1.0)
+        return np.clip(values, -1.0, 1.0)
+
+    def _convert_action(self, action: np.ndarray) -> ControlInput:
+        """Convert a normalized action into vehicle controls."""
+        steering, longitudinal = self._normalize_action(action)
 
         parameters = self._simulation.parameters
 
@@ -136,7 +143,10 @@ class ParallelRacingEnv(ParallelEnv):
         self._step_count = 0
         self.agents = self.possible_agents.copy()
 
-        observations = {agent: self._placeholder_observation() for agent in self.agents}
+        # Previous actions start at neutral for every agent.
+        self._previous_actions = {agent: (0.0, 0.0) for agent in self.agents}
+
+        observations = {agent: self._build_observation(agent) for agent in self.agents}
 
         infos = {agent: {} for agent in self.agents}
 
@@ -175,16 +185,30 @@ class ParallelRacingEnv(ParallelEnv):
                 f"unknown: {sorted(unknown)}."
             )
 
-        controls = {agent: self._convert_action(actions[agent]) for agent in self.agents}
+        # Validate and clip each action once, then use the same values
+        # for both vehicle controls and the previous-action observations.
+        normalized_actions = {
+            agent: self._normalize_action(actions[agent]) for agent in self.agents
+        }
+
+        controls = {agent: self._convert_action(normalized_actions[agent]) for agent in self.agents}
 
         active_agents = self.agents.copy()
 
         self._simulation.step(controls, self.dt)
         self._step_count += 1
 
+        self._previous_actions = {
+            agent: (
+                float(normalized_actions[agent][0]),
+                float(normalized_actions[agent][1]),
+            )
+            for agent in active_agents
+        }
+
         episode_truncated = self._step_count >= self.max_episode_steps
 
-        observations = {agent: self._placeholder_observation() for agent in active_agents}
+        observations = {agent: self._build_observation(agent) for agent in active_agents}
 
         # Reward calculation is intentionally deferred.
         rewards = {agent: 0.0 for agent in active_agents}
