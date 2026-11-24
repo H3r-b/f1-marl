@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import math
 from collections.abc import Mapping
+from dataclasses import asdict
 
 import numpy as np
 from gymnasium import spaces
@@ -11,6 +12,7 @@ from gymnasium.utils import seeding
 from pettingzoo import ParallelEnv
 
 from f1_marl.environment.observations import ObservationBuilder
+from f1_marl.environment.rewards import RewardCalculator, RewardConfig
 from f1_marl.simulation.scenarios import RaceScenario
 from f1_marl.simulation.vehicle import ControlInput
 
@@ -19,9 +21,9 @@ class ParallelRacingEnv(ParallelEnv):
     """Simultaneous multi-agent racing environment.
 
     Connects agent actions to the simulation manager and provides
-    structured observations through the observation builder.
+    structured observations and configurable racing rewards.
 
-    Reward calculation and individual race termination remain placeholders.
+    Individual race termination remains a placeholder.
     """
 
     metadata = {"name": "f1_marl_parallel_v0"}
@@ -35,6 +37,7 @@ class ParallelRacingEnv(ParallelEnv):
         *,
         dt: float = 0.05,
         max_episode_steps: int = 10_000,
+        reward_config: RewardConfig | None = None,
     ) -> None:
         if not isinstance(scenario, RaceScenario):
             raise TypeError("scenario must be a RaceScenario.")
@@ -48,6 +51,9 @@ class ParallelRacingEnv(ParallelEnv):
             or max_episode_steps <= 0
         ):
             raise ValueError("max_episode_steps must be a positive integer.")
+
+        if reward_config is not None and not isinstance(reward_config, RewardConfig):
+            raise TypeError("reward_config must be a RewardConfig.")
 
         self.scenario = scenario
         self.dt = float(dt)
@@ -81,6 +87,7 @@ class ParallelRacingEnv(ParallelEnv):
         self._simulation = None
         self._step_count = 0
         self._observation_builder = ObservationBuilder()
+        self._reward_calculator = RewardCalculator(reward_config)
         self._previous_actions: dict[str, tuple[float, float]] = {}
 
     def observation_space(self, agent: str) -> spaces.Box:
@@ -140,6 +147,7 @@ class ParallelRacingEnv(ParallelEnv):
         self.np_random, self.np_random_seed = seeding.np_random(seed)
 
         self._simulation = self.scenario.create_simulation()
+        self._reward_calculator.reset(self._simulation)
         self._step_count = 0
         self.agents = self.possible_agents.copy()
 
@@ -210,8 +218,13 @@ class ParallelRacingEnv(ParallelEnv):
 
         observations = {agent: self._build_observation(agent) for agent in active_agents}
 
-        # Reward calculation is intentionally deferred.
-        rewards = {agent: 0.0 for agent in active_agents}
+        # Calculate individual racing rewards.
+        reward_breakdowns = self._reward_calculator.calculate(
+            self._simulation,
+            normalized_actions,
+        )
+
+        rewards = {agent: reward_breakdowns[agent].total for agent in active_agents}
 
         # Individual race termination is not implemented yet.
         terminations = {agent: False for agent in active_agents}
@@ -222,6 +235,7 @@ class ParallelRacingEnv(ParallelEnv):
             agent: {
                 "simulation_time_s": self._simulation.simulation_time_s,
                 "step_count": self._step_count,
+                "reward_components": asdict(reward_breakdowns[agent]),
             }
             for agent in active_agents
         }
