@@ -6,6 +6,7 @@ from gymnasium.spaces import Box
 from pettingzoo.test import parallel_api_test
 
 from f1_marl.environment import ParallelRacingEnv
+from f1_marl.environment.rewards import RewardConfig
 from f1_marl.simulation import RaceScenario, create_oval_track
 
 
@@ -176,3 +177,107 @@ def test_reset_clears_previous_actions(env):
     for observation in observations.values():
         assert observation[3] == pytest.approx(0.0)
         assert observation[4] == pytest.approx(0.0)
+
+
+def test_step_returns_finite_rewards(
+    env: ParallelRacingEnv,
+) -> None:
+    env.reset(seed=42)
+
+    actions = {agent: np.array([0.0, 1.0], dtype=np.float32) for agent in env.agents}
+
+    _, rewards, _, _, _ = env.step(actions)
+
+    assert set(rewards) == set(actions)
+    assert all(np.isfinite(value) for value in rewards.values())
+    assert all(isinstance(value, float) for value in rewards.values())
+    assert any(value > 0.0 for value in rewards.values())
+
+
+def test_reward_components_are_exposed_in_infos(
+    env: ParallelRacingEnv,
+) -> None:
+    env.reset(seed=42)
+
+    actions = {agent: np.array([0.0, 1.0], dtype=np.float32) for agent in env.agents}
+
+    _, rewards, _, _, infos = env.step(actions)
+
+    expected_components = {
+        "progress",
+        "speed",
+        "overtaking",
+        "collision",
+        "track_limits",
+        "oscillation",
+    }
+
+    for agent in actions:
+        components = infos[agent]["reward_components"]
+
+        assert set(components) == expected_components
+        assert all(np.isfinite(value) for value in components.values())
+        assert rewards[agent] == pytest.approx(sum(components.values()))
+
+
+def test_environment_accepts_custom_reward_configuration(
+    scenario: RaceScenario,
+) -> None:
+    config = RewardConfig(
+        progress_weight=0.0,
+        speed_weight=0.0,
+        overtaking_weight=0.0,
+        collision_penalty=0.0,
+        track_limit_penalty=0.0,
+        oscillation_penalty=0.0,
+    )
+
+    env = ParallelRacingEnv(
+        scenario,
+        reward_config=config,
+    )
+
+    env.reset(seed=42)
+
+    actions = {agent: np.array([0.0, 1.0], dtype=np.float32) for agent in env.agents}
+
+    _, rewards, _, _, infos = env.step(actions)
+
+    for agent in actions:
+        assert rewards[agent] == 0.0
+        assert all(value == 0.0 for value in infos[agent]["reward_components"].values())
+
+
+def test_environment_rejects_invalid_reward_configuration(
+    scenario: RaceScenario,
+) -> None:
+    with pytest.raises(TypeError, match="reward_config"):
+        ParallelRacingEnv(
+            scenario,
+            reward_config={},
+        )
+
+
+def test_reset_clears_environment_reward_history(
+    env: ParallelRacingEnv,
+) -> None:
+    env.reset(seed=42)
+
+    actions = {agent: np.array([0.0, 1.0], dtype=np.float32) for agent in env.agents}
+
+    _, first_rewards, _, _, first_infos = env.step(actions)
+
+    reverse_actions = {agent: np.array([0.0, -1.0], dtype=np.float32) for agent in env.agents}
+
+    env.step(reverse_actions)
+
+    env.reset(seed=42)
+
+    _, reset_rewards, _, _, reset_infos = env.step(actions)
+
+    for agent in actions:
+        assert reset_rewards[agent] == pytest.approx(first_rewards[agent])
+
+        assert reset_infos[agent]["reward_components"] == pytest.approx(
+            first_infos[agent]["reward_components"]
+        )
