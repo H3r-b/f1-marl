@@ -4,7 +4,6 @@
 
 F1-MARL is a research-oriented software project exploring how multiple autonomous racing agents learn to compete through reinforcement learning and self-play.
 
-> **Project status:** Phase 0 — repository foundation. The racing simulator and learning algorithms are not implemented yet.
 
 ## Research direction
 
