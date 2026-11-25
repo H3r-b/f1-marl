@@ -530,3 +530,216 @@ def test_overtake_requires_confirmed_separation(
     rewards = calculator.calculate(manager, actions)
 
     assert rewards["car_1"].overtaking == 0.0
+
+
+def test_reward_calculation_after_agent_removal(
+    manager: SimulationManager,
+) -> None:
+    """Remaining agents continue receiving rewards."""
+    manager.add_vehicle(
+        "car_1",
+        VehicleState(x=10.0, speed_mps=20.0),
+    )
+    manager.add_vehicle(
+        "car_2",
+        VehicleState(x=30.0, speed_mps=10.0),
+    )
+
+    calculator = RewardCalculator()
+    calculator.reset(manager)
+
+    manager.remove_vehicle("car_1")
+    calculator.remove_agents(("car_1",))
+
+    manager.step({"car_2": ControlInput()}, dt=0.1)
+
+    rewards = calculator.calculate(
+        manager,
+        {"car_2": np.zeros(2)},
+    )
+
+    assert set(rewards) == {"car_2"}
+    assert rewards["car_2"].progress == pytest.approx(1.0)
+    assert math.isfinite(rewards["car_2"].total)
+
+
+def test_agent_removal_preserves_oscillation_history(
+    manager: SimulationManager,
+) -> None:
+    """Removing an agent preserves surviving control history."""
+    manager.add_vehicle("car_1", VehicleState(x=10.0))
+    manager.add_vehicle("car_2", VehicleState(x=30.0))
+
+    calculator = RewardCalculator()
+    calculator.reset(manager)
+
+    manager.step(
+        {
+            "car_1": ControlInput(),
+            "car_2": ControlInput(),
+        },
+        dt=0.1,
+    )
+
+    calculator.calculate(
+        manager,
+        {
+            "car_1": np.zeros(2),
+            "car_2": np.array([1.0, 0.0]),
+        },
+    )
+
+    manager.remove_vehicle("car_1")
+    calculator.remove_agents(("car_1",))
+
+    manager.step({"car_2": ControlInput()}, dt=0.1)
+
+    rewards = calculator.calculate(
+        manager,
+        {"car_2": np.array([-1.0, 0.0])},
+    )
+
+    assert rewards["car_2"].oscillation == pytest.approx(-0.1)
+
+
+def test_agent_removal_preserves_collision_history(
+    manager: SimulationManager,
+) -> None:
+    """Persistent collisions between surviving agents remain tracked."""
+    manager.add_vehicle("car_1", VehicleState(x=50.0))
+    manager.add_vehicle("car_2", VehicleState(x=10.0))
+    manager.add_vehicle("car_3", VehicleState(x=11.0))
+
+    calculator = RewardCalculator()
+    calculator.reset(manager)
+
+    manager.step(
+        {agent: ControlInput() for agent in manager.vehicle_ids},
+        dt=0.1,
+    )
+
+    first_rewards = calculator.calculate(
+        manager,
+        {agent: np.zeros(2) for agent in manager.vehicle_ids},
+    )
+
+    assert first_rewards["car_2"].collision == pytest.approx(-5.0)
+    assert first_rewards["car_3"].collision == pytest.approx(-5.0)
+
+    manager.remove_vehicle("car_1")
+    calculator.remove_agents(("car_1",))
+
+    manager.step(
+        {agent: ControlInput() for agent in manager.vehicle_ids},
+        dt=0.1,
+    )
+
+    rewards = calculator.calculate(
+        manager,
+        {agent: np.zeros(2) for agent in manager.vehicle_ids},
+    )
+
+    assert rewards["car_2"].collision == 0.0
+    assert rewards["car_3"].collision == 0.0
+
+
+def test_agent_removal_preserves_overtaking_history(
+    manager: SimulationManager,
+) -> None:
+    """Surviving agents retain their confirmed relative ordering."""
+    manager.add_vehicle(
+        "car_1",
+        VehicleState(x=80.0),
+    )
+    manager.add_vehicle(
+        "car_2",
+        VehicleState(x=10.0, y=-2.0, speed_mps=10.0),
+    )
+    manager.add_vehicle(
+        "car_3",
+        VehicleState(x=14.0, y=2.0),
+    )
+
+    calculator = RewardCalculator()
+    calculator.reset(manager)
+
+    manager.step(
+        {agent: ControlInput() for agent in manager.vehicle_ids},
+        dt=0.4,
+    )
+
+    rewards = calculator.calculate(
+        manager,
+        {agent: np.zeros(2) for agent in manager.vehicle_ids},
+    )
+
+    assert rewards["car_2"].overtaking == 0.0
+
+    manager.remove_vehicle("car_1")
+    calculator.remove_agents(("car_1",))
+
+    manager.step(
+        {agent: ControlInput() for agent in manager.vehicle_ids},
+        dt=0.3,
+    )
+
+    rewards = calculator.calculate(
+        manager,
+        {agent: np.zeros(2) for agent in manager.vehicle_ids},
+    )
+
+    assert rewards["car_2"].overtaking == pytest.approx(2.0)
+    assert rewards["car_3"].overtaking == 0.0
+
+
+def test_remove_unknown_reward_agent(
+    manager: SimulationManager,
+) -> None:
+    """Invalid removal requests do not modify existing history."""
+    manager.add_vehicle("car_1")
+    manager.add_vehicle("car_2")
+
+    calculator = RewardCalculator()
+    calculator.reset(manager)
+
+    with pytest.raises(ValueError, match="Unknown reward agents"):
+        calculator.remove_agents(("car_1", "unknown"))
+
+    manager.step(
+        {agent: ControlInput() for agent in manager.vehicle_ids},
+        dt=0.1,
+    )
+
+    rewards = calculator.calculate(
+        manager,
+        {agent: np.zeros(2) for agent in manager.vehicle_ids},
+    )
+
+    assert set(rewards) == {"car_1", "car_2"}
+
+
+def test_remove_multiple_reward_agents(
+    manager: SimulationManager,
+) -> None:
+    """Multiple finished agents can be removed simultaneously."""
+    manager.add_vehicle("car_1", VehicleState(x=10.0))
+    manager.add_vehicle("car_2", VehicleState(x=30.0))
+    manager.add_vehicle("car_3", VehicleState(x=50.0))
+
+    calculator = RewardCalculator()
+    calculator.reset(manager)
+
+    manager.remove_vehicle("car_1")
+    manager.remove_vehicle("car_2")
+
+    calculator.remove_agents(("car_1", "car_2"))
+
+    manager.step({"car_3": ControlInput()}, dt=0.1)
+
+    rewards = calculator.calculate(
+        manager,
+        {"car_3": np.zeros(2)},
+    )
+
+    assert set(rewards) == {"car_3"}
+    assert math.isfinite(rewards["car_3"].total)
