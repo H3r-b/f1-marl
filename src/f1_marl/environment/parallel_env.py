@@ -12,6 +12,7 @@ from gymnasium.utils import seeding
 from pettingzoo import ParallelEnv
 
 from f1_marl.environment.observations import ObservationBuilder
+from f1_marl.environment.race_lifecycle import RaceConfig, RaceLifecycleManager
 from f1_marl.environment.rewards import RewardCalculator, RewardConfig
 from f1_marl.simulation.scenarios import RaceScenario
 from f1_marl.simulation.vehicle import ControlInput
@@ -23,7 +24,8 @@ class ParallelRacingEnv(ParallelEnv):
     Connects agent actions to the simulation manager and provides
     structured observations and configurable racing rewards.
 
-    Individual race termination remains a placeholder.
+    Supports configurable multi-lap races and individual agent lifecycle
+    management.
     """
 
     metadata = {"name": "f1_marl_parallel_v0"}
@@ -38,6 +40,7 @@ class ParallelRacingEnv(ParallelEnv):
         dt: float = 0.05,
         max_episode_steps: int = 10_000,
         reward_config: RewardConfig | None = None,
+        race_config: RaceConfig | None = None,
     ) -> None:
         if not isinstance(scenario, RaceScenario):
             raise TypeError("scenario must be a RaceScenario.")
@@ -54,6 +57,8 @@ class ParallelRacingEnv(ParallelEnv):
 
         if reward_config is not None and not isinstance(reward_config, RewardConfig):
             raise TypeError("reward_config must be a RewardConfig.")
+        if race_config is not None and not isinstance(race_config, RaceConfig):
+            raise TypeError("race_config must be a RaceConfig.")
 
         self.scenario = scenario
         self.dt = float(dt)
@@ -88,6 +93,7 @@ class ParallelRacingEnv(ParallelEnv):
         self._step_count = 0
         self._observation_builder = ObservationBuilder()
         self._reward_calculator = RewardCalculator(reward_config)
+        self._race_lifecycle = RaceLifecycleManager(race_config)
         self._previous_actions: dict[str, tuple[float, float]] = {}
 
     def observation_space(self, agent: str) -> spaces.Box:
@@ -98,13 +104,36 @@ class ParallelRacingEnv(ParallelEnv):
         """Return the action space for an agent."""
         return self.action_spaces[agent]
 
-    def _build_observation(self, agent: str) -> np.ndarray:
-        """Build the current structured observation for an agent."""
+    def _build_observation(
+        self,
+        agent: str,
+        *,
+        excluded_opponents: tuple[str, ...] = (),
+    ) -> np.ndarray:
+        """Build the current race-aware observation for an agent."""
         return self._observation_builder.build(
             agent,
             self._simulation,
             self._previous_actions,
+            race_progress=self._race_lifecycle.progress[agent],
+            race_distance_m=self._race_lifecycle.race_distance_m,
+            excluded_opponents=excluded_opponents,
         )
+
+    def _build_race_info(self, agent: str) -> dict:
+        """Build race lifecycle information for an agent."""
+        progress = self._race_lifecycle.progress[agent]
+
+        return {
+            "total_laps": self._race_lifecycle.config.total_laps,
+            "race_distance_m": self._race_lifecycle.race_distance_m,
+            "cumulative_progress_m": progress.cumulative_progress_m,
+            "completed_laps": progress.completed_laps,
+            "race_position": progress.race_position,
+            "finished": progress.finished,
+            "finish_position": progress.finish_position,
+            "finish_time_s": progress.finish_time_s,
+        }
 
     def _normalize_action(self, action: np.ndarray) -> np.ndarray:
         """Validate an action and clip it to the normalized action bounds."""
@@ -147,6 +176,12 @@ class ParallelRacingEnv(ParallelEnv):
         self.np_random, self.np_random_seed = seeding.np_random(seed)
 
         self._simulation = self.scenario.create_simulation()
+
+        self._race_lifecycle.reset(
+            self._simulation,
+            start_s_m=self.scenario.start_s_m,
+        )
+
         self._reward_calculator.reset(self._simulation)
         self._step_count = 0
         self.agents = self.possible_agents.copy()
@@ -156,7 +191,14 @@ class ParallelRacingEnv(ParallelEnv):
 
         observations = {agent: self._build_observation(agent) for agent in self.agents}
 
-        infos = {agent: {} for agent in self.agents}
+        infos = {
+            agent: {
+                "simulation_time_s": self._simulation.simulation_time_s,
+                "step_count": self._step_count,
+                "race": self._build_race_info(agent),
+            }
+            for agent in self.agents
+        }
 
         return observations, infos
 
@@ -206,6 +248,9 @@ class ParallelRacingEnv(ParallelEnv):
         self._simulation.step(controls, self.dt)
         self._step_count += 1
 
+        newly_finished = self._race_lifecycle.update(self._simulation)
+        finished_agents = set(newly_finished)
+
         self._previous_actions = {
             agent: (
                 float(normalized_actions[agent][0]),
@@ -216,9 +261,7 @@ class ParallelRacingEnv(ParallelEnv):
 
         episode_truncated = self._step_count >= self.max_episode_steps
 
-        observations = {agent: self._build_observation(agent) for agent in active_agents}
-
-        # Calculate individual racing rewards.
+        # Calculate rewards before removing any finished vehicles.
         reward_breakdowns = self._reward_calculator.calculate(
             self._simulation,
             normalized_actions,
@@ -226,21 +269,43 @@ class ParallelRacingEnv(ParallelEnv):
 
         rewards = {agent: reward_breakdowns[agent].total for agent in active_agents}
 
-        # Individual race termination is not implemented yet.
-        terminations = {agent: False for agent in active_agents}
+        # Preserve terminal observations and final-step collision events.
+        observations = {
+            agent: self._build_observation(
+                agent,
+                excluded_opponents=(() if agent in finished_agents else newly_finished),
+            )
+            for agent in active_agents
+        }
 
-        truncations = {agent: episode_truncated for agent in active_agents}
+        # Natural race completion takes precedence over truncation.
+        terminations = {agent: agent in finished_agents for agent in active_agents}
+
+        truncations = {
+            agent: episode_truncated and not terminations[agent] for agent in active_agents
+        }
 
         infos = {
             agent: {
                 "simulation_time_s": self._simulation.simulation_time_s,
                 "step_count": self._step_count,
                 "reward_components": asdict(reward_breakdowns[agent]),
+                "race": self._build_race_info(agent),
             }
             for agent in active_agents
         }
 
-        if episode_truncated:
-            self.agents = []
+        # Remove finished vehicles only after capturing their transitions.
+        if newly_finished:
+            self._reward_calculator.remove_agents(newly_finished)
+
+            for agent in newly_finished:
+                self._simulation.remove_vehicle(agent)
+                self._previous_actions.pop(agent, None)
+
+        # Retain only agents that can participate in the next step.
+        self.agents = [
+            agent for agent in active_agents if not terminations[agent] and not truncations[agent]
+        ]
 
         return observations, rewards, terminations, truncations, infos

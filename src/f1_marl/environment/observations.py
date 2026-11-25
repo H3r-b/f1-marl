@@ -7,6 +7,7 @@ from dataclasses import dataclass
 
 import numpy as np
 
+from f1_marl.environment.race_lifecycle import RaceProgress
 from f1_marl.simulation.collision import VehicleCollisionEvent
 from f1_marl.simulation.manager import SimulationManager
 from f1_marl.simulation.track_interaction import calculate_track_interaction
@@ -53,10 +54,28 @@ class ObservationBuilder:
         agent_id: str,
         simulation: SimulationManager,
         previous_actions: dict[str, tuple[float, float]] | None = None,
+        *,
+        race_progress: RaceProgress | None = None,
+        race_distance_m: float | None = None,
+        excluded_opponents: tuple[str, ...] = (),
     ) -> np.ndarray:
         """Build the 29-dimensional observation for one vehicle."""
         if agent_id not in simulation.vehicle_ids:
             raise KeyError(f"Unknown vehicle: {agent_id}")
+
+        if (race_progress is None) != (race_distance_m is None):
+            raise ValueError("Race progress and race distance must be provided together.")
+
+        if race_progress is not None:
+            if race_progress.agent_id != agent_id:
+                raise ValueError("Race progress must belong to the observed agent.")
+
+            if not math.isfinite(race_progress.cumulative_progress_m):
+                raise ValueError("Race progress must be finite.")
+
+        if race_distance_m is not None:
+            if not math.isfinite(race_distance_m) or race_distance_m <= 0.0:
+                raise ValueError("Race distance must be finite and positive.")
 
         previous_actions = previous_actions or {}
 
@@ -97,12 +116,31 @@ class ObservationBuilder:
         observation[3] = np.clip(previous_steering, -1.0, 1.0)
         observation[4] = np.clip(previous_longitudinal, -1.0, 1.0)
 
-        progress = float(np.clip(ego_interaction.progress_fraction, 0.0, 1.0))
+        if race_progress is None or race_distance_m is None:
+            progress = float(np.clip(ego_interaction.progress_fraction, 0.0, 1.0))
 
-        observation[5] = progress
+            observation[5] = progress
+            observation[6] = 1.0 - progress
+        else:
+            cumulative_progress = race_progress.cumulative_progress_m
 
-        # Provisional one-lap race assumption.
-        observation[6] = 1.0 - progress
+            lap_progress = (cumulative_progress % track.length_m) / track.length_m
+
+            if cumulative_progress < 0.0:
+                lap_progress = 0.0
+
+            if race_progress.finished:
+                lap_progress = 1.0
+
+            remaining_distance = race_distance_m - cumulative_progress
+
+            observation[5] = np.clip(lap_progress, 0.0, 1.0)
+
+            observation[6] = np.clip(
+                remaining_distance / race_distance_m,
+                0.0,
+                1.0,
+            )
 
         # ---------------------------------------------------------
         # 7-11: Track curvature ahead
@@ -127,7 +165,7 @@ class ObservationBuilder:
         opponents = []
 
         for opponent_id, opponent_state in states.items():
-            if opponent_id == agent_id:
+            if opponent_id == agent_id or opponent_id in excluded_opponents:
                 continue
 
             distance = math.hypot(

@@ -147,6 +147,36 @@ class RewardCalculator:
             for pair, gap in self._previous_gaps.items()
         }
 
+    def remove_agents(self, agent_ids: tuple[str, ...]) -> None:
+        """Remove finished agents while preserving active reward history."""
+        removed_agents = set(agent_ids)
+
+        unknown_agents = removed_agents - self._previous_positions.keys()
+
+        if unknown_agents:
+            raise ValueError(f"Unknown reward agents: {sorted(unknown_agents)}")
+
+        for agent in removed_agents:
+            self._previous_positions.pop(agent, None)
+            self._previous_actions.pop(agent, None)
+            self._previous_action_deltas.pop(agent, None)
+
+        self._previous_gaps = {
+            pair: gap
+            for pair, gap in self._previous_gaps.items()
+            if removed_agents.isdisjoint(pair)
+        }
+
+        self._confirmed_order = {
+            pair: order
+            for pair, order in self._confirmed_order.items()
+            if removed_agents.isdisjoint(pair)
+        }
+
+        self._active_collision_pairs = {
+            pair for pair in self._active_collision_pairs if removed_agents.isdisjoint(pair)
+        }
+
     @staticmethod
     def _signed_gap(
         first_s: float,
